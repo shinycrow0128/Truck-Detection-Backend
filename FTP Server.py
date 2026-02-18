@@ -106,10 +106,6 @@ class ReolinkFTPHandler(FTPHandler):
                             print(f"Box coords : {pred['box_xyxy']}")
                             print(f"Number of detections: {pred['num_detections']}")
                         print("═" * 60)
-
-                        out_path = Path(file).with_suffix(Path(file).suffix + ".truck.txt")
-                        out_path.write_text(str(pred), encoding="utf-8")
-                        print(f"[SAVED] {out_path}")
                     except Exception as e:
                         print(f"[DETECTION ERROR] {e}")
                 elif file.lower().endswith('.mp4'):
