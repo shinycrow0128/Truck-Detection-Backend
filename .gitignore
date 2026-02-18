@@ -19,3 +19,5 @@ env/
 camera_settings.log
 
 *.weights
+
+best.pt
