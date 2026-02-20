@@ -1,2 +1,4 @@
 pyftpdlib
 ultralytics
+supabase
+dotenv
