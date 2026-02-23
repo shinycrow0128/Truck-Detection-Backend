@@ -6,7 +6,7 @@ import re
 import time
 import threading
 from datetime import datetime
-from typing import Optional, Union
+from collections import defaultdict
 
 # ─── YOLO + OpenCV ────────────────────────────────────────────────
 from ultralytics import YOLO
@@ -83,6 +83,13 @@ def parse_timestamp_from_filename(filename: str) -> datetime | None:
             pass
     return None
 
+def get_direction(x):
+    if x == "left":
+        return "outgoing"
+    if x == "right":
+        return "incoming"
+    return None  # or raise an error, or return "unknown", etc.
+
 def save_truck_detection(
     camera_id: str,
     truck_id: str | None,
@@ -130,7 +137,7 @@ def save_truck_detection(
         "camera_id": get_camera_id(supabase, camera_id),
         "truck_id": truck_id,
         "bin_status": bin_status.lower(),
-        "truck_status": truck_status.lower(),
+        "truck_status": get_direction(truck_status).lower(),
         "detected_at": detection_time.isoformat(),
         "image_url": image_url,
         "video_url": video_url,
@@ -150,31 +157,36 @@ def save_truck_detection(
 
 def analyze_video_for_truck(video_path: str):
     """
-    Returns (result: int 0|1, message: str, output_image_path: str or None)
+    Returns (result: int 0|1, message: str, output_image_path: str or None, direction: str or None)
+    direction will be "left", "right" or "unknown"
     """
     try:
         model = get_yolo_model()
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
-            return 0, f"Cannot open video: {video_path}", None
+            return 0, f"Cannot open video: {video_path}", None, None
 
         video_name = os.path.splitext(os.path.basename(video_path))[0]
         output_image_path = f"{video_name}_truck.jpg"
 
+        # ─── Tracking history ───────────────────────────────────────
+        track_history = defaultdict(list)           # track_id → list of center_x
+        track_confs   = defaultdict(list)           # track_id → list of confidences
+        frame_count   = 0
+        truck_frame_count_total = 0
+
         best_conf = 0.0
         best_frame = None
         best_box = None
-        truck_frame_count = 0
-        frame_count = 0
+        best_track_id = None
 
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
                 break
             frame_count += 1
-            if frame_count % 5 == 0:
-                print(f" Processing frame {frame_count}...", end="\r")
 
+            # Run detection + tracking (persist tracks between frames)
             results = model.track(
                 frame,
                 persist=True,
@@ -183,41 +195,92 @@ def analyze_video_for_truck(video_path: str):
                 verbose=False
             )[0]
 
-            if len(results.boxes) > 0:
-                truck_frame_count += 1
-                boxes = results.boxes
-                confs = boxes.conf.cpu().numpy()
-                max_idx = np.argmax(confs)
-                this_conf = confs[max_idx]
-                if this_conf > best_conf:
-                    best_conf = this_conf
-                    best_frame = frame.copy()
-                    best_box = boxes.xyxy[max_idx].cpu().numpy().astype(int)
+            if results.boxes.id is not None:   # tracking is active
+                boxes   = results.boxes.xyxy.cpu().numpy().astype(int)
+                confs   = results.boxes.conf.cpu().numpy()
+                ids     = results.boxes.id.cpu().numpy().astype(int)
+
+                for box, conf, tid in zip(boxes, confs, ids):
+                    x1, y1, x2, y2 = box
+                    center_x = (x1 + x2) // 2
+
+                    track_history[tid].append(center_x)
+                    track_confs[tid].append(conf)
+
+                    truck_frame_count_total += 1
+
+                    # Keep best single frame for visualization
+                    if conf > best_conf:
+                        best_conf = conf
+                        best_frame = frame.copy()
+                        best_box = box
+                        best_track_id = tid
 
         cap.release()
-        print(f" Total frames with truck: {truck_frame_count}/{frame_count}")
+        print(f" Total truck detections: {truck_frame_count_total} over {frame_count} frames")
 
-        if truck_frame_count >= MIN_FRAMES_REQUIRED and best_frame is not None:
+        if not track_history:
+            msg = "TRUCK NOT PRESENT (0) — no tracked objects"
+            print(f" {msg}")
+            return 0, msg, None, None
+
+        # ─── Find best track (most reliable + longest) ───────────────
+        best_track_id_final = None
+        best_avg_conf = 0.0
+        best_length = 0
+
+        for tid, conf_list in track_confs.items():
+            if len(conf_list) < MIN_FRAMES_REQUIRED:
+                continue
+            avg_conf = np.mean(conf_list)
+            if avg_conf > best_avg_conf or (avg_conf == best_avg_conf and len(conf_list) > best_length):
+                best_avg_conf = avg_conf
+                best_length = len(conf_list)
+                best_track_id_final = tid
+
+        if best_track_id_final is None:
+            msg = f"TRUCK NOT PRESENT (0) — no track ≥ {MIN_FRAMES_REQUIRED} frames"
+            print(f" {msg}")
+            return 0, msg, None, None
+
+        # ─── Determine direction from best track ─────────────────────
+        xs = track_history[best_track_id_final]
+        if len(xs) < 2:
+            direction = "unknown"
+        else:
+            first_x = xs[0]
+            last_x  = xs[-1]
+            delta_x = last_x - first_x
+
+            if abs(delta_x) < 15:   # ← tune this threshold (pixels)
+                direction = "unknown / stationary"
+            elif delta_x > 0:
+                direction = "right"     # x increases → left-to-right
+            else:
+                direction = "left"
+
+        # ─── Draw best frame (optional improvement) ──────────────────
+        if best_frame is not None and best_box is not None:
             x1, y1, x2, y2 = best_box
-            label = f"truck {best_conf:.2f} ({truck_frame_count} frames)"
+            label = (f"ID {best_track_id_final}  {best_avg_conf:.2f}  "
+                     f"({len(xs)} frames)  {direction}")
             cv2.rectangle(best_frame, (x1, y1), (x2, y2), (0, 255, 0), 5)
             cv2.putText(best_frame, label, (x1, y1 - 15),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 3)
+            
             cv2.imwrite(output_image_path, best_frame)
 
-            msg = (f"TRUCK DETECTED (1) — {truck_frame_count} frames ≥ {MIN_FRAMES_REQUIRED} "
-                   f"— saved: {output_image_path} (conf={best_conf:.3f})")
-            print(f" {msg}")
-            return 1, msg, output_image_path
-        else:
-            msg = f"TRUCK NOT PRESENT (0) — only {truck_frame_count} frames"
-            print(f" {msg}")
-            return 0, msg, None
+        msg = (f"TRUCK DETECTED (1) — track ID {best_track_id_final} — "
+               f"{len(xs)} frames ≥ {MIN_FRAMES_REQUIRED} — "
+               f"direction: {direction} — saved: {output_image_path}")
+        print(f" {msg}")
+
+        return 1, msg, output_image_path, direction
 
     except Exception as e:
         msg = f"Analysis failed: {str(e)}"
         print(f" ERROR: {msg}")
-        return 0, msg, None
+        return 0, msg, None, None
 
 
 class ReolinkFTPHandler(FTPHandler):
@@ -239,7 +302,7 @@ class ReolinkFTPHandler(FTPHandler):
                 print(" → Video → starting truck detection...")
 
                 def background_task():
-                    result, message, img_path = analyze_video_for_truck(file)
+                    result, message, img_path, direction = analyze_video_for_truck(file)
 
                     status = "POSITIVE (1)" if result == 1 else "NEGATIVE (0)"
                     print(f" [ANALYSIS] {status}")
@@ -255,7 +318,7 @@ class ReolinkFTPHandler(FTPHandler):
                             camera_id=os.path.basename(file).split('_')[0],
                             truck_id="e613cecc-8ac8-48d5-ad7f-74e025fb6a42",          # ← change later if needed
                             bin_status="full",
-                            truck_status="outgoing",
+                            truck_status=direction,
                             detection_time=dt,
                             image_path=img_path,
                             video_path=file
