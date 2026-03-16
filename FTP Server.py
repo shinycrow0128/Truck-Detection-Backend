@@ -18,10 +18,10 @@ from supabase import create_client, Client
 from dotenv import load_dotenv
 
 # ─── Configuration ────────────────────────────────────────────────
-MODEL_PATH = "best.pt"
-TRUCK_CLASS_ID = 1
-MIN_CONF = 0.50
-MIN_FRAMES_REQUIRED = 5
+FIRST_MODEL_PATH = "first_step_model.pt"
+SECOND_MODEL_PATH = "second_step_model.pt"
+TRUCK_CLASS_ID = [0,1,2,3,4]
+MIN_CONF = 0.80
 VIDEO_EXTENSIONS = ('.mp4', '.avi', '.mov', '.mkv')
 
 # Supabase setup
@@ -59,17 +59,50 @@ def get_camera_id(supabase: Client, camera_name: str) -> str | None:
         print(f"Error while fetching camera '{camera_name}': {e}")
         return None
 
-# Global YOLO model (lazy load)
-_MODEL = None
+def get_truck_id(supabase: Client, truck_name: int | str) -> str | None:
+    """
+    Get truck id by truck_name.
+    Returns the id (usually uuid string) or None if not found.
+    """
+    try:
+        search_name = f"Truck-{int(truck_name) + 1}"
+        response = (
+            supabase.table("truck")
+            .select("id")
+            .eq("truck_name", search_name)
+            .maybe_single()
+            .execute()
+        )
+        
+        if response.data:
+            return response.data["id"]
+        return None
+        
+    except Exception as e:
+        print(f"Error while fetching truck '{truck_name}': {e}")
+        return None
 
-def get_yolo_model():
-    global _MODEL
-    if _MODEL is None:
-        if not os.path.exists(MODEL_PATH):
-            raise FileNotFoundError(f"YOLO model not found: {MODEL_PATH}")
-        _MODEL = YOLO(MODEL_PATH)
-        print(f"[YOLO] Loaded model: {MODEL_PATH}")
-    return _MODEL
+# Global models (lazy load)
+_MODEL_DET  = None   # detection + tracking
+_MODEL_CLS  = None   # classification (empty/full)
+
+def get_first_model():
+    global _MODEL_DET
+    if _MODEL_DET is None:
+        if not os.path.exists(FIRST_MODEL_PATH):
+            raise FileNotFoundError(f"YOLO model not found: {FIRST_MODEL_PATH}")
+        _MODEL_DET = YOLO(FIRST_MODEL_PATH)
+        print(f"[YOLO] Loaded model: {FIRST_MODEL_PATH}")
+    return _MODEL_DET
+
+def get_second_model():
+    global _MODEL_CLS
+    if _MODEL_CLS is None:
+        if not os.path.exists(SECOND_MODEL_PATH):
+            raise FileNotFoundError(f"YOLO model not found: {SECOND_MODEL_PATH}")
+        _MODEL_CLS = YOLO(SECOND_MODEL_PATH)
+        print(f"[YOLO] Loaded model: {SECOND_MODEL_PATH}")
+    return _MODEL_CLS
 
 def parse_timestamp_from_filename(filename: str) -> datetime | None:
     """Extracts timestamp like 20260219085003 from Brunswick_00_20260219085003.mp4"""
@@ -135,7 +168,7 @@ def save_truck_detection(
     # Prepare record
     data = {
         "camera_id": get_camera_id(supabase, camera_id),
-        "truck_id": truck_id,
+        "truck_id": get_truck_id(supabase, truck_id),
         "bin_status": bin_status.lower(),
         "truck_status": get_direction(truck_status).lower(),
         "detected_at": detection_time.isoformat(),
@@ -146,6 +179,7 @@ def save_truck_detection(
     try:
         response = supabase.table("truck_detections").insert(data).execute()
         if response.data:
+            _safe_delete(image_path)
             return response.data[0]
         else:
             print("[Supabase] Insert returned no data")
@@ -155,16 +189,26 @@ def save_truck_detection(
 
     return None
 
+def _safe_delete(path: str | None):
+    """Delete file if it exists — no crash on missing file"""
+    if path and os.path.exists(path):
+        try:
+            os.remove(path)
+            print(f"  Deleted local file: {os.path.basename(path)}")
+        except Exception as e:
+            print(f"  Could not delete {path}: {e}")
+
 def analyze_video_for_truck(video_path: str):
     """
-    Returns (result: int 0|1, message: str, output_image_path: str or None, direction: str or None)
+    Returns (result: int, message: str, output_image_path: str or None, direction: str or None)
     direction will be "left", "right" or "unknown"
     """
     try:
-        model = get_yolo_model()
+        model1 = get_first_model()
+        model2 = get_second_model()
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
-            return 0, f"Cannot open video: {video_path}", None, None
+            return None, "unknown", f"Cannot open video: {video_path}", None, None
 
         video_name = os.path.splitext(os.path.basename(video_path))[0]
         output_image_path = f"{video_name}_truck.jpg"
@@ -178,7 +222,8 @@ def analyze_video_for_truck(video_path: str):
         best_conf = 0.0
         best_frame = None
         best_box = None
-        best_track_id = None
+        best_truck_id = None
+        best_track_id_final = None
 
         while cap.isOpened():
             ret, frame = cap.read()
@@ -187,7 +232,7 @@ def analyze_video_for_truck(video_path: str):
             frame_count += 1
 
             # Run detection + tracking (persist tracks between frames)
-            results = model.track(
+            results = model1.track(
                 frame,
                 persist=True,
                 conf=MIN_CONF,
@@ -198,9 +243,10 @@ def analyze_video_for_truck(video_path: str):
             if results.boxes.id is not None:   # tracking is active
                 boxes   = results.boxes.xyxy.cpu().numpy().astype(int)
                 confs   = results.boxes.conf.cpu().numpy()
+                cls_ids = results.boxes.cls.cpu().numpy().astype(int)
                 ids     = results.boxes.id.cpu().numpy().astype(int)
 
-                for box, conf, tid in zip(boxes, confs, ids):
+                for box, conf, tid, cls_id in zip(boxes, confs, ids, cls_ids):
                     x1, y1, x2, y2 = box
                     center_x = (x1 + x2) // 2
 
@@ -214,36 +260,16 @@ def analyze_video_for_truck(video_path: str):
                         best_conf = conf
                         best_frame = frame.copy()
                         best_box = box
-                        best_track_id = tid
-
+                        best_truck_id = cls_id
+                        best_track_id_final = tid
         cap.release()
         print(f" Total truck detections: {truck_frame_count_total} over {frame_count} frames")
 
         if not track_history:
             msg = "TRUCK NOT PRESENT (0) — no tracked objects"
             print(f" {msg}")
-            return 0, msg, None, None
+            return None, "unknown", msg, None, None
 
-        # ─── Find best track (most reliable + longest) ───────────────
-        best_track_id_final = None
-        best_avg_conf = 0.0
-        best_length = 0
-
-        for tid, conf_list in track_confs.items():
-            if len(conf_list) < MIN_FRAMES_REQUIRED:
-                continue
-            avg_conf = np.mean(conf_list)
-            if avg_conf > best_avg_conf or (avg_conf == best_avg_conf and len(conf_list) > best_length):
-                best_avg_conf = avg_conf
-                best_length = len(conf_list)
-                best_track_id_final = tid
-
-        if best_track_id_final is None:
-            msg = f"TRUCK NOT PRESENT (0) — no track ≥ {MIN_FRAMES_REQUIRED} frames"
-            print(f" {msg}")
-            return 0, msg, None, None
-
-        # ─── Determine direction from best track ─────────────────────
         xs = track_history[best_track_id_final]
         if len(xs) < 2:
             direction = "unknown"
@@ -259,28 +285,64 @@ def analyze_video_for_truck(video_path: str):
             else:
                 direction = "left"
 
+
+        # ─── Classify bin status (empty/full) ────────────────────────
+        bin_status = "unknown"
+
+        if best_frame is None or best_box is None:
+            print("Cannot classify bin: no best frame or bounding box available")
+        else:
+            x1, y1, x2, y2 = best_box
+
+            margin = 30
+            crop_x1 = max(0, x1 - margin)
+            crop_y1 = max(0, y1 - margin)
+            crop_x2 = min(best_frame.shape[1], x2 + margin)
+            crop_y2 = min(best_frame.shape[0], y2 + margin)
+
+            truck_crop = best_frame[crop_y1:crop_y2, crop_x1:crop_x2]
+
+            if truck_crop.size == 0 or truck_crop.shape[0] < 8 or truck_crop.shape[1] < 8:
+                print(f"Warning: invalid crop size {truck_crop.shape if truck_crop is not None else 'None'} → skipping classification")
+            else:
+                try:
+                    cls_results = model2(truck_crop, conf=0.60, verbose=False)[0]
+
+                    if len(cls_results.boxes) > 0:
+                        # take the highest confidence detection
+                        best_cls_idx = cls_results.boxes.conf.argmax()
+                        bin_class_id = int(cls_results.boxes.cls[best_cls_idx])
+                        bin_conf     = float(cls_results.boxes.conf[best_cls_idx])
+
+                        if bin_conf >= 0.65:          # ← your threshold
+                            bin_status = "full" if bin_class_id == 1 else "empty"
+                            print(f"Bin classified: {bin_status} (conf {bin_conf:.3f})")
+                        else:
+                            print(f"Bin classification confidence too low: {bin_conf:.3f}")
+                    else:
+                        print("Classification model returned no detections on truck crop")
+                except Exception as e:
+                    print(f"Classification step failed: {e}")
+
+
         # ─── Draw best frame (optional improvement) ──────────────────
         if best_frame is not None and best_box is not None:
+
             x1, y1, x2, y2 = best_box
-            label = (f"ID {best_track_id_final}  {best_avg_conf:.2f}  "
-                     f"({len(xs)} frames)  {direction}")
+            label = (f"Truck {best_truck_id+1} : {direction}, {bin_status}")
             cv2.rectangle(best_frame, (x1, y1), (x2, y2), (0, 255, 0), 5)
             cv2.putText(best_frame, label, (x1, y1 - 15),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 3)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
             
             cv2.imwrite(output_image_path, best_frame)
-
-        msg = (f"TRUCK DETECTED (1) — track ID {best_track_id_final} — "
-               f"{len(xs)} frames ≥ {MIN_FRAMES_REQUIRED} — "
-               f"direction: {direction} — saved: {output_image_path}")
-        print(f" {msg}")
-
-        return 1, msg, output_image_path, direction
+        msg = (f"Truck : {best_truck_id+1}")
+        print(best_truck_id, bin_status, msg, output_image_path, direction)
+        return best_truck_id, bin_status, msg, output_image_path, direction
 
     except Exception as e:
         msg = f"Analysis failed: {str(e)}"
         print(f" ERROR: {msg}")
-        return 0, msg, None, None
+        return None, "unknown", msg, None, None
 
 
 class ReolinkFTPHandler(FTPHandler):
@@ -302,13 +364,9 @@ class ReolinkFTPHandler(FTPHandler):
                 print(" → Video → starting truck detection...")
 
                 def background_task():
-                    result, message, img_path, direction = analyze_video_for_truck(file)
+                    truck_id, bin_status, message, img_path, direction = analyze_video_for_truck(file)
 
-                    status = "POSITIVE (1)" if result == 1 else "NEGATIVE (0)"
-                    print(f" [ANALYSIS] {status}")
-                    print(f" → {message}")
-
-                    if result == 1 and img_path and supabase is not None:
+                    if truck_id != None and img_path and supabase is not None:
                         dt = parse_timestamp_from_filename(file)
                         if dt is None:
                             dt = datetime.utcnow()
@@ -316,16 +374,14 @@ class ReolinkFTPHandler(FTPHandler):
                         print(" → Uploading to Supabase...")
                         save_truck_detection(
                             camera_id=os.path.basename(file).split('_')[0],
-                            truck_id="e613cecc-8ac8-48d5-ad7f-74e025fb6a42",          # ← change later if needed
-                            bin_status="full",
+                            truck_id=truck_id,          # ← change later if needed
+                            bin_status=bin_status,
                             truck_status=direction,
                             detection_time=dt,
                             image_path=img_path,
                             video_path=file
                         )
 
-                    if img_path and os.path.exists(img_path):
-                        print(f" → Best frame: {img_path}")
                     print(" " + "─" * 70)
 
                 threading.Thread(target=background_task, daemon=True).start()
