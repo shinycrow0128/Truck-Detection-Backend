@@ -136,7 +136,7 @@ def upload_image_to_s3(file_path: str) -> str | None:
 def insert_video_row(supabase: Client, dt: datetime, video_url: str):
     try:
         response = (
-            supabase.table("videos")
+            supabase.table("video")
             .insert({
                 "date": dt.isoformat(),
                 "video_url": video_url
@@ -260,7 +260,7 @@ def save_truck_detection(
         "truck_status": get_direction(truck_status).lower(),
         "detected_at": detection_time.isoformat(),
         "image_url": image_url,
-        "video_url": video_path,
+        "video_id": video_path,
     }
 
     try:
