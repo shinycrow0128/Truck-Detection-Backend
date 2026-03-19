@@ -7,6 +7,9 @@ import time
 import threading
 from datetime import datetime
 from collections import defaultdict
+from botocore.config import Config
+from pathlib import Path
+
 
 # ─── AWS S3 ────────────────────────────────────────────────────────
 import boto3
@@ -70,55 +73,87 @@ def upload_video_to_s3(file_path: str) -> str | None:
     Requires env: AWS_S3_BUCKET (+ AWS credentials via env/instance role).
     """
 
-    print(f"Uploading video to S3: {file_path}")
-    return None
+    filename = os.path.basename(file_path)
+    object_key = f"videos/{filename}"
+    
+    bucket_name = os.getenv("BUCKET_NAME")
 
-    # bucket_name = os.getenv("BUCKET_NAME")
+    s3 = _get_s3_client()
+    if s3 is None:
+        print("[S3] Not configured (missing AWS_S3_BUCKET) → skipping S3 upload")
+        return None
 
-    # s3 = _get_s3_client()
-    # if s3 is None:
-    #     print("[S3] Not configured (missing AWS_S3_BUCKET) → skipping S3 upload")
-    #     return None
+    try:
+        s3.upload_file(
+            Filename=file_path,
+            Bucket=bucket_name,
+            Key=object_key,
+            ExtraArgs={
+                "ContentType": _guess_content_type(file_path),
+                'ContentDisposition': 'inline'
+            },
+        )
+        url = f"https://{bucket_name}.s3.us-east-1.amazonaws.com/{object_key}"
 
-    # try:
-    #     s3.upload_file(
-    #         Filename=file_path,
-    #         Bucket=bucket_name,
-    #         Key=object_key,
-    #         ExtraArgs={
-    #             "ContentType": _guess_content_type(file_path),
-    #             'ContentDisposition': 'inline'
-    #         },
-    #     )
-    #     url = f"https://{bucket_name}.s3.us-east-1.amazonaws.com/{object_key}"
+    except (BotoCoreError, ClientError) as e:
+        print(f"[S3] Upload failed: {e}")
+        return None
 
-    # except (BotoCoreError, ClientError) as e:
-    #     print(f"[S3] Upload failed: {e}")
-    #     return None
+    return url
 
-    # return url
+def upload_image_to_s3(file_path: str) -> str | None:
+    """
+    Uploads a detected image to S3 and returns a public URL (or None on failure).
+    Requires env: AWS_S3_BUCKET (+ AWS credentials via env/instance role).
+    """
+
+    object_key = f"images/{file_path}"
+    bucket_name = os.getenv("BUCKET_NAME")
+
+    s3 = _get_s3_client()
+    if s3 is None:
+        print("[S3] Not configured (missing AWS_S3_BUCKET) → skipping S3 upload")
+        return None
+
+    try:
+        s3.upload_file(
+            Filename=file_path,
+            Bucket=bucket_name,
+            Key=object_key,
+            ExtraArgs={
+                "ContentType": 'image/jpg',
+                'ContentDisposition': 'inline'
+            },
+        )
+        url = f"https://{bucket_name}.s3.us-east-1.amazonaws.com/{object_key}"
+
+    except (BotoCoreError, ClientError) as e:
+        print(f"[S3] Upload failed: {e}")
+        return None
+
+    return url
 
 def insert_video_row(supabase: Client, dt: datetime, video_url: str):
-    """
-    Inserts a row into Supabase table `videos` with date/time and the S3 URL.
-    Tries a couple common timestamp column names for compatibility.
-    """
-    payload_variants = [
-        {"date": dt.isoformat(), "video_url": video_url},
-        {"created_at": dt.isoformat(), "video_url": video_url},
-        {"uploaded_at": dt.isoformat(), "video_url": video_url},
-    ]
+    try:
+        response = (
+            supabase.table("videos")
+            .insert({
+                "date": dt.isoformat(),
+                "video_url": video_url
+            })
+            .execute()
+        )
 
-    last_err = None
-    for payload in payload_variants:
-        try:
-            resp = supabase.table("videos").insert(payload).execute()
-            return resp.data[0] if resp.data else None
-        except Exception as e:
-            last_err = e
-
-    print(f"[Supabase] Failed inserting into videos table: {last_err}")
-    return None
+        if response.data and len(response.data) > 0:
+            inserted_row = response.data[0]
+            video_id = inserted_row["id"]          # ← this is your auto-generated ID
+            return video_id                         # or return the whole dict if you want more
+        else:
+            print("[Supabase] Insert appeared to succeed but no row returned")
+            return None
+    except Exception as e:
+        print(f"[Supabase] Failed: {e}")
+        return None
 
 def get_camera_id(supabase: Client, camera_name: str) -> str | None:
     """
@@ -215,38 +250,7 @@ def save_truck_detection(
     image_path: str | None = None,
     video_path: str | None = None
 ):
-    """Minimal version used inside FTP handler"""
-    if supabase is None:
-        print("Supabase not configured → skipping database save")
-        return None
-
-    image_url = None
-    video_url = None
-
-    try:
-        ts_str = detection_time.strftime("%Y%m%d_%H%M%S")
-        if image_path and os.path.exists(image_path):
-            filename = f"{camera_id}/{ts_str}_truck.jpg"
-            with open(image_path, "rb") as f:
-                supabase.storage.from_(BUCKET_NAME).upload(
-                    path=filename,
-                    file=f,
-                    file_options={"content-type": "image/jpeg"}
-                )
-            image_url = supabase.storage.from_(BUCKET_NAME).get_public_url(filename)
-
-        if video_path and os.path.exists(video_path):
-            filename = f"{camera_id}/{ts_str}_truck.mp4"
-            with open(video_path, "rb") as f:
-                supabase.storage.from_(BUCKET_NAME).upload(
-                    path=filename,
-                    file=f,
-                    file_options={"content-type": "video/mp4"}
-                )
-            video_url = supabase.storage.from_(BUCKET_NAME).get_public_url(filename)
-
-    except Exception as e:
-        print(f"Supabase Storage upload failed: {e}")
+    image_url = upload_image_to_s3(image_path)
     
     # Prepare record
     data = {
@@ -256,7 +260,7 @@ def save_truck_detection(
         "truck_status": get_direction(truck_status).lower(),
         "detected_at": detection_time.isoformat(),
         "image_url": image_url,
-        "video_url": video_url,
+        "video_url": video_path,
     }
 
     try:
@@ -458,23 +462,23 @@ class ReolinkFTPHandler(FTPHandler):
                     s3_url = upload_video_to_s3(file)
 
                     # 2) Save date + S3 url in Supabase table `videos`
-                    # if supabase is not None and s3_url:
-                    #     insert_video_row(supabase, dt=dt, video_url=s3_url)
+                    if supabase is not None and s3_url:
+                        video_id = insert_video_row(supabase, dt=dt, video_url=s3_url)
 
                     # # 3) Run detection pipeline (existing behavior)
-                    # truck_id, bin_status, message, img_path, direction = analyze_video_for_truck(file)
+                    truck_id, bin_status, message, img_path, direction = analyze_video_for_truck(file)
 
-                    # if truck_id != None and img_path and supabase is not None:
-                    #     print(" → Uploading to Supabase...")
-                    #     save_truck_detection(
-                    #         camera_id=camera_id,
-                    #         truck_id=truck_id,          # ← change later if needed
-                    #         bin_status=bin_status,
-                    #         truck_status=direction,
-                    #         detection_time=dt,
-                    #         image_path=img_path,
-                    #         video_path=file
-                    #     )
+                    if truck_id != None and img_path and supabase is not None:
+                        print(" → Uploading to Supabase...")
+                        save_truck_detection(
+                            camera_id=camera_id,
+                            truck_id=truck_id,          # ← change later if needed
+                            bin_status=bin_status,
+                            truck_status=direction,
+                            detection_time=dt,
+                            image_path=img_path,
+                            video_path=video_id
+                        )
 
                     # print(" " + "─" * 70)
 
