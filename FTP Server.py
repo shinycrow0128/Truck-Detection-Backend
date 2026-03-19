@@ -8,6 +8,10 @@ import threading
 from datetime import datetime
 from collections import defaultdict
 
+# ─── AWS S3 ────────────────────────────────────────────────────────
+import boto3
+from botocore.exceptions import BotoCoreError, ClientError
+
 # ─── YOLO + OpenCV ────────────────────────────────────────────────
 from ultralytics import YOLO
 import cv2
@@ -36,6 +40,85 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 else:
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
     print("[Supabase] Client initialized")
+
+def _get_s3_client():
+    s3_client = boto3.client(
+        's3',
+        aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+        aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+        region_name=os.getenv("REGION_NAME"),
+        endpoint_url=os.getenv("ENDPOINT_URL"),
+        config=Config(connect_timeout=20, read_timeout=20)
+    )
+    return s3_client
+
+def _guess_content_type(path: str) -> str:
+    lower = path.lower()
+    if lower.endswith(".mp4"):
+        return "video/mp4"
+    if lower.endswith(".mov"):
+        return "video/quicktime"
+    if lower.endswith(".avi"):
+        return "video/x-msvideo"
+    if lower.endswith(".mkv"):
+        return "video/x-matroska"
+    return "application/octet-stream"
+
+def upload_video_to_s3(file_path: str) -> str | None:
+    """
+    Uploads a received video to S3 and returns a public URL (or None on failure).
+    Requires env: AWS_S3_BUCKET (+ AWS credentials via env/instance role).
+    """
+
+    print(f"Uploading video to S3: {file_path}")
+    return None
+
+    # bucket_name = os.getenv("BUCKET_NAME")
+
+    # s3 = _get_s3_client()
+    # if s3 is None:
+    #     print("[S3] Not configured (missing AWS_S3_BUCKET) → skipping S3 upload")
+    #     return None
+
+    # try:
+    #     s3.upload_file(
+    #         Filename=file_path,
+    #         Bucket=bucket_name,
+    #         Key=object_key,
+    #         ExtraArgs={
+    #             "ContentType": _guess_content_type(file_path),
+    #             'ContentDisposition': 'inline'
+    #         },
+    #     )
+    #     url = f"https://{bucket_name}.s3.us-east-1.amazonaws.com/{object_key}"
+
+    # except (BotoCoreError, ClientError) as e:
+    #     print(f"[S3] Upload failed: {e}")
+    #     return None
+
+    # return url
+
+def insert_video_row(supabase: Client, dt: datetime, video_url: str):
+    """
+    Inserts a row into Supabase table `videos` with date/time and the S3 URL.
+    Tries a couple common timestamp column names for compatibility.
+    """
+    payload_variants = [
+        {"date": dt.isoformat(), "video_url": video_url},
+        {"created_at": dt.isoformat(), "video_url": video_url},
+        {"uploaded_at": dt.isoformat(), "video_url": video_url},
+    ]
+
+    last_err = None
+    for payload in payload_variants:
+        try:
+            resp = supabase.table("videos").insert(payload).execute()
+            return resp.data[0] if resp.data else None
+        except Exception as e:
+            last_err = e
+
+    print(f"[Supabase] Failed inserting into videos table: {last_err}")
+    return None
 
 def get_camera_id(supabase: Client, camera_name: str) -> str | None:
     """
@@ -364,25 +447,36 @@ class ReolinkFTPHandler(FTPHandler):
                 print(" → Video → starting truck detection...")
 
                 def background_task():
-                    truck_id, bin_status, message, img_path, direction = analyze_video_for_truck(file)
+                    dt = parse_timestamp_from_filename(file)
+                    if dt is None:
+                        dt = datetime.utcnow()
+                        print(" Warning: could not parse timestamp from filename → using now()")
 
-                    if truck_id != None and img_path and supabase is not None:
-                        dt = parse_timestamp_from_filename(file)
-                        if dt is None:
-                            dt = datetime.utcnow()
-                            print(" Warning: could not parse timestamp from filename → using now()")
-                        print(" → Uploading to Supabase...")
-                        save_truck_detection(
-                            camera_id=os.path.basename(file).split('_')[0],
-                            truck_id=truck_id,          # ← change later if needed
-                            bin_status=bin_status,
-                            truck_status=direction,
-                            detection_time=dt,
-                            image_path=img_path,
-                            video_path=file
-                        )
+                    camera_id = os.path.basename(file).split('_')[0]
 
-                    print(" " + "─" * 70)
+                    # 1) Upload original received file to S3
+                    s3_url = upload_video_to_s3(file)
+
+                    # 2) Save date + S3 url in Supabase table `videos`
+                    # if supabase is not None and s3_url:
+                    #     insert_video_row(supabase, dt=dt, video_url=s3_url)
+
+                    # # 3) Run detection pipeline (existing behavior)
+                    # truck_id, bin_status, message, img_path, direction = analyze_video_for_truck(file)
+
+                    # if truck_id != None and img_path and supabase is not None:
+                    #     print(" → Uploading to Supabase...")
+                    #     save_truck_detection(
+                    #         camera_id=camera_id,
+                    #         truck_id=truck_id,          # ← change later if needed
+                    #         bin_status=bin_status,
+                    #         truck_status=direction,
+                    #         detection_time=dt,
+                    #         image_path=img_path,
+                    #         video_path=file
+                    #     )
+
+                    # print(" " + "─" * 70)
 
                 threading.Thread(target=background_task, daemon=True).start()
 

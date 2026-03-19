@@ -2,3 +2,5 @@ pyftpdlib
 ultralytics
 supabase
 dotenv
+python-dotenv
+boto3
