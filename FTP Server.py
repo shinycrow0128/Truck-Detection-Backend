@@ -235,10 +235,10 @@ def parse_timestamp_from_filename(filename: str) -> datetime | None:
     return None
 
 def get_direction(x):
-    if x == "left":
-        return "outgoing"
-    if x == "right":
-        return "incoming"
+    if x == "empty":
+        return "OUTGOING"
+    if x == "full":
+        return "INCOMING"
     return None  # or raise an error, or return "unknown", etc.
 
 def save_truck_detection(
@@ -310,7 +310,7 @@ def analyze_video_for_truck(video_path: str):
         best_frame = None
         best_box = None
         best_truck_id = None
-        best_track_id_final = None
+        # best_track_id_final = None
 
         while cap.isOpened():
             ret, frame = cap.read()
@@ -348,7 +348,7 @@ def analyze_video_for_truck(video_path: str):
                         best_frame = frame.copy()
                         best_box = box
                         best_truck_id = cls_id
-                        best_track_id_final = tid
+                        # best_track_id_final = tid
         cap.release()
         print(f" Total truck detections: {truck_frame_count_total} over {frame_count} frames")
 
@@ -357,20 +357,20 @@ def analyze_video_for_truck(video_path: str):
             print(f" {msg}")
             return None, "unknown", msg, None, None
 
-        xs = track_history[best_track_id_final]
-        if len(xs) < 2:
-            direction = "unknown"
-        else:
-            first_x = xs[0]
-            last_x  = xs[-1]
-            delta_x = last_x - first_x
+        # xs = track_history[best_track_id_final]
+        # if len(xs) < 2:
+        #     direction = "unknown"
+        # else:
+        #     first_x = xs[0]
+        #     last_x  = xs[-1]
+        #     delta_x = last_x - first_x
 
-            if abs(delta_x) < 15:   # ← tune this threshold (pixels)
-                direction = "unknown / stationary"
-            elif delta_x > 0:
-                direction = "right"     # x increases → left-to-right
-            else:
-                direction = "left"
+        #     if abs(delta_x) < 15:   # ← tune this threshold (pixels)
+        #         direction = "unknown / stationary"
+        #     elif delta_x > 0:
+        #         direction = "right"     # x increases → left-to-right
+        #     else:
+        #         direction = "left"
 
 
         # ─── Classify bin status (empty/full) ────────────────────────
@@ -379,52 +379,76 @@ def analyze_video_for_truck(video_path: str):
         if best_frame is None or best_box is None:
             print("Cannot classify bin: no best frame or bounding box available")
         else:
-            x1, y1, x2, y2 = best_box
+            results_bin = model2.predict(
+                source=video_path,
+                conf=0.7,
+                classes=[0, 1],
+                stream=True,
+                verbose=False
+            )
 
-            margin = 30
-            crop_x1 = max(0, x1 - margin)
-            crop_y1 = max(0, y1 - margin)
-            crop_x2 = min(best_frame.shape[1], x2 + margin)
-            crop_y2 = min(best_frame.shape[0], y2 + margin)
+            full_count = 0
+            empty_count = 0
 
-            truck_crop = best_frame[crop_y1:crop_y2, crop_x1:crop_x2]
-
-            if truck_crop.size == 0 or truck_crop.shape[0] < 8 or truck_crop.shape[1] < 8:
-                print(f"Warning: invalid crop size {truck_crop.shape if truck_crop is not None else 'None'} → skipping classification")
-            else:
-                try:
-                    cls_results = model2(truck_crop, conf=0.60, verbose=False)[0]
-
-                    if len(cls_results.boxes) > 0:
-                        # take the highest confidence detection
-                        best_cls_idx = cls_results.boxes.conf.argmax()
-                        bin_class_id = int(cls_results.boxes.cls[best_cls_idx])
-                        bin_conf     = float(cls_results.boxes.conf[best_cls_idx])
-
-                        if bin_conf >= 0.65:          # ← your threshold
-                            bin_status = "full" if bin_class_id == 1 else "empty"
-                            print(f"Bin classified: {bin_status} (conf {bin_conf:.3f})")
-                        else:
-                            print(f"Bin classification confidence too low: {bin_conf:.3f}")
+            for result in results_bin:
+                if len(result.boxes) != 0:
+                    best_idx = result.boxes.conf.argmax()
+                    cls_id   = int(result.boxes.cls[best_idx])
+                    if cls_id == 0:
+                        empty_count += 1
                     else:
-                        print("Classification model returned no detections on truck crop")
-                except Exception as e:
-                    print(f"Classification step failed: {e}")
+                        full_count += 1
+            
+            if (empty_count > full_count):
+                bin_status = "empty"
+            else:
+                bin_status = "full"
+            # x1, y1, x2, y2 = best_box
+
+            # margin = 30
+            # crop_x1 = max(0, x1 - margin)
+            # crop_y1 = max(0, y1 - margin)
+            # crop_x2 = min(best_frame.shape[1], x2 + margin)
+            # crop_y2 = min(best_frame.shape[0], y2 + margin)
+
+            # truck_crop = best_frame[crop_y1:crop_y2, crop_x1:crop_x2]
+
+            # if truck_crop.size == 0 or truck_crop.shape[0] < 8 or truck_crop.shape[1] < 8:
+            #     print(f"Warning: invalid crop size {truck_crop.shape if truck_crop is not None else 'None'} → skipping classification")
+            # else:
+            #     try:
+            #         cls_results = model2(truck_crop, conf=0.60, verbose=False)[0]
+
+            #         if len(cls_results.boxes) > 0:
+            #             # take the highest confidence detection
+            #             best_cls_idx = cls_results.boxes.conf.argmax()
+            #             bin_class_id = int(cls_results.boxes.cls[best_cls_idx])
+            #             bin_conf     = float(cls_results.boxes.conf[best_cls_idx])
+
+            #             if bin_conf >= 0.65:          # ← your threshold
+            #                 bin_status = "full" if bin_class_id == 1 else "empty"
+            #                 print(f"Bin classified: {bin_status} (conf {bin_conf:.3f})")
+            #             else:
+            #                 print(f"Bin classification confidence too low: {bin_conf:.3f}")
+            #         else:
+            #             print("Classification model returned no detections on truck crop")
+            #     except Exception as e:
+            #         print(f"Classification step failed: {e}")
 
 
         # ─── Draw best frame (optional improvement) ──────────────────
         if best_frame is not None and best_box is not None:
 
             x1, y1, x2, y2 = best_box
-            label = (f"Truck {best_truck_id+1} : {direction}, {bin_status}")
+            label = (f"Truck {best_truck_id+1} : {get_direction(bin_status)}")
             cv2.rectangle(best_frame, (x1, y1), (x2, y2), (0, 255, 0), 5)
             cv2.putText(best_frame, label, (x1, y1 - 15),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
             
             cv2.imwrite(output_image_path, best_frame)
         msg = (f"Truck : {best_truck_id+1}")
-        print(best_truck_id, bin_status, msg, output_image_path, direction)
-        return best_truck_id, bin_status, msg, output_image_path, direction
+        print(best_truck_id, bin_status, msg, output_image_path, get_direction(bin_status))
+        return best_truck_id, bin_status, msg, output_image_path, get_direction(bin_status)
 
     except Exception as e:
         msg = f"Analysis failed: {str(e)}"
@@ -468,17 +492,17 @@ class ReolinkFTPHandler(FTPHandler):
                     # # 3) Run detection pipeline (existing behavior)
                     truck_id, bin_status, message, img_path, direction = analyze_video_for_truck(file)
 
-                    if truck_id != None and img_path and supabase is not None:
-                        print(" → Uploading to Supabase...")
-                        save_truck_detection(
-                            camera_id=camera_id,
-                            truck_id=truck_id,          # ← change later if needed
-                            bin_status=bin_status,
-                            truck_status=direction,
-                            detection_time=dt,
-                            image_path=img_path,
-                            video_path=video_id
-                        )
+                    # if truck_id != None and img_path and supabase is not None:
+                    #     print(" → Uploading to Supabase...")
+                    #     save_truck_detection(
+                    #         camera_id=camera_id,
+                    #         truck_id=truck_id,          # ← change later if needed
+                    #         bin_status=bin_status,
+                    #         truck_status=direction,
+                    #         detection_time=dt,
+                    #         image_path=img_path,
+                    #         video_path=video_id
+                    #     )
 
                     # print(" " + "─" * 70)
 
