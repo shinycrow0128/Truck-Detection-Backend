@@ -257,7 +257,7 @@ def save_truck_detection(
         "camera_id": get_camera_id(supabase, camera_id),
         "truck_id": get_truck_id(supabase, truck_id),
         "bin_status": bin_status.lower(),
-        "truck_status": get_direction(truck_status).lower(),
+        "truck_status": truck_status.lower(),
         "detected_at": detection_time.isoformat(),
         "image_url": image_url,
         "video_id": video_path,
@@ -492,19 +492,19 @@ class ReolinkFTPHandler(FTPHandler):
                     # # 3) Run detection pipeline (existing behavior)
                     truck_id, bin_status, message, img_path, direction = analyze_video_for_truck(file)
 
-                    # if truck_id != None and img_path and supabase is not None:
-                    #     print(" → Uploading to Supabase...")
-                    #     save_truck_detection(
-                    #         camera_id=camera_id,
-                    #         truck_id=truck_id,          # ← change later if needed
-                    #         bin_status=bin_status,
-                    #         truck_status=direction,
-                    #         detection_time=dt,
-                    #         image_path=img_path,
-                    #         video_path=video_id
-                    #     )
+                    if truck_id != None and img_path and supabase is not None:
+                        print(" → Uploading to Supabase...")
+                        save_truck_detection(
+                            camera_id=camera_id,
+                            truck_id=truck_id,          # ← change later if needed
+                            bin_status=bin_status,
+                            truck_status=direction,
+                            detection_time=dt,
+                            image_path=img_path,
+                            video_path=video_id
+                        )
 
-                    # print(" " + "─" * 70)
+                    print(" " + "─" * 70)
 
                 threading.Thread(target=background_task, daemon=True).start()
 
