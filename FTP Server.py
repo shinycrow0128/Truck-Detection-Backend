@@ -28,7 +28,7 @@ from dotenv import load_dotenv
 FIRST_MODEL_PATH = "first_step_model.pt"
 SECOND_MODEL_PATH = "second_step_model.pt"
 TRUCK_CLASS_ID = [0,1,2,3,4]
-MIN_CONF = 0.7
+MIN_CONF = 0.9
 VIDEO_EXTENSIONS = ('.mp4', '.avi', '.mov', '.mkv')
 
 # Supabase setup
