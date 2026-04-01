@@ -354,7 +354,12 @@ def analyze_video_for_truck(video_path: str):
 
         if not track_history:
             msg = "TRUCK NOT PRESENT (0) — no tracked objects"
-            print(f" {msg}")
+            print(msg)                                      # no extra space
+            return None, "unknown", msg, None, None
+
+        elif truck_frame_count_total < 10:
+            msg = f"TRUCK NOT CONFIRMED — only {truck_frame_count_total} detected frames"
+            print(msg)
             return None, "unknown", msg, None, None
 
         # xs = track_history[best_track_id_final]
