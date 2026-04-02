@@ -45,19 +45,21 @@ class ReolinkFTPHandler(FTPHandler):
                     if config.supabase is not None and s3_url:
                         video_id = insert_video_row(config.supabase, dt=dt, video_url=s3_url)
 
-                    truck_id, bin_status, message, img_path, direction = analyze_video_for_truck(file)
+                    truck_infos = analyze_video_for_truck(file)
+                    for truck_id, bin_status, message, img_path, direction in truck_infos:
+                        # if truck_id is not None and img_path and config.supabase is not None:
+                        #     print(" → Uploading to Supabase...")
+                        #     save_truck_detection(
+                        #         camera_id=camera_id,
+                        #         truck_id=truck_id,
+                        #         bin_status=bin_status,
+                        #         truck_status=direction,
+                        #         detection_time=dt,
+                        #         image_path=img_path,
+                        #         video_path=video_id,
+                        #     )
 
-                    # if truck_id != None and img_path and config.supabase is not None:
-                    #     print(" → Uploading to Supabase...")
-                    #     save_truck_detection(
-                    #         camera_id=camera_id,
-                    #         truck_id=truck_id,
-                    #         bin_status=bin_status,
-                    #         truck_status=direction,
-                    #         detection_time=dt,
-                    #         image_path=img_path,
-                    #         video_path=video_id,
-                    #     )
+                    # If you want aggregated logging only (not per-truck), adjust here.
 
                     print(" " + "─" * 70)
 

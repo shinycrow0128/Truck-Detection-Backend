@@ -20,18 +20,22 @@ def get_direction(x: str) -> str | None:
 
 def analyze_video_for_truck(video_path: str):
     """
-    Returns (result, message, output_image_path, direction).
-    direction will be "OUTGOING", "INCOMING", or None (via get_direction).
+    Returns a list of tuples:
+      (truck_id, bin_status, msg, best_frame_image_path, direction)
+
+    - `truck_id` is the 0-based truck class id coming from the tracker/model.
+    - Only truck types with at least `MIN_TRUCK_FRAMES` detected frames are returned.
+    - If no truck reaches the threshold, returns an empty list.
     """
     try:
         model1 = get_first_model()
         model2 = get_second_model()
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
-            return None, "unknown", f"Cannot open video: {video_path}", None, None
+            return []
 
         video_name = os.path.splitext(os.path.basename(video_path))[0]
-        output_image_path = f"{video_name}_truck.jpg"
+        MIN_TRUCK_FRAMES = 20
 
         track_history = defaultdict(list)
         frame_count = 0
@@ -103,68 +107,47 @@ def analyze_video_for_truck(video_path: str):
         if not track_history:
             msg = "TRUCK NOT PRESENT (0) — no tracked objects"
             print(msg)
-            return None, "unknown", msg, None, None
+            return []
 
-        if truck_frame_count_total < 10:
-            msg = f"TRUCK NOT CONFIRMED — only {truck_frame_count_total} detected frames"
+        # Filter trucks: if a truck appears in the video less than 20 frames, ignore it.
+        counts_sorted_all = sorted(
+            truck_type_frame_counts.items(), key=lambda kv: kv[1], reverse=True
+        )
+        qualified = [(t, c) for (t, c) in counts_sorted_all if c >= MIN_TRUCK_FRAMES]
+        if not qualified:
+            counts_str_all = ", ".join([f"Truck {t + 1}: {c} frames" for t, c in counts_sorted_all])
+            msg = (
+                f"TRUCK NOT CONFIRMED — {counts_str_all} "
+                f"(min {MIN_TRUCK_FRAMES} frames each)"
+            )
             print(msg)
-            return None, "unknown", msg, None, None
+            return []
 
         bin_status = "unknown"
+        results_bin = model2.predict(
+            source=video_path,
+            conf=0.7,
+            classes=[0, 1],
+            stream=True,
+            verbose=False,
+        )
 
-        if best_frame is None or best_box is None:
-            print("Cannot classify bin: no best frame or bounding box available")
-        else:
-            results_bin = model2.predict(
-                source=video_path,
-                conf=0.7,
-                classes=[0, 1],
-                stream=True,
-                verbose=False,
-            )
+        full_count = 0
+        empty_count = 0
+        for result in results_bin:
+            if len(result.boxes) != 0:
+                best_idx = result.boxes.conf.argmax()
+                cls_id = int(result.boxes.cls[best_idx])
+                if cls_id == 0:
+                    empty_count += 1
+                else:
+                    full_count += 1
 
-            full_count = 0
-            empty_count = 0
+        bin_status = "empty" if empty_count > full_count else "full"
+        direction = get_direction(bin_status)
 
-            for result in results_bin:
-                if len(result.boxes) != 0:
-                    best_idx = result.boxes.conf.argmax()
-                    cls_id = int(result.boxes.cls[best_idx])
-                    if cls_id == 0:
-                        empty_count += 1
-                    else:
-                        full_count += 1
-
-            if empty_count > full_count:
-                bin_status = "empty"
-            else:
-                bin_status = "full"
-
-        # If multiple trucks are present in the video, pick the truck type with the most detected frames.
-        # This matches the requested behavior like: Truck 1 = 65 frames, Truck 2 = 40 frames.
-        counts_str = ""
-        counts_sorted: list[tuple[int, int]] = []
-        if truck_type_frame_counts:
-            counts_sorted = sorted(
-                truck_type_frame_counts.items(), key=lambda kv: kv[1], reverse=True
-            )
-            counts_str = ", ".join(
-                [
-                    f"Truck {truck_type + 1}: {count} frames"
-                    for truck_type, count in counts_sorted
-                ]
-            )
-
-        # Save one best frame per truck type that appears.
-        # - Primary truck (highest frame count) keeps the old output name: `{video_name}_truck.jpg`
-        # - Others get suffixed names: `{video_name}_truck_{n}.jpg`
-        saved_paths: list[str] = []
-        primary_truck_type: int | None = None
-        if counts_sorted:
-            primary_truck_type = counts_sorted[0][0]
-            best_truck_id = primary_truck_type
-
-        for idx, (truck_type, _count) in enumerate(counts_sorted):
+        truck_infos: list[tuple[int, str, str, str, str | None]] = []
+        for truck_type, count in qualified:
             best_type_entry = best_per_type.get(int(truck_type))
             if best_type_entry is None:
                 continue
@@ -174,7 +157,7 @@ def analyze_video_for_truck(video_path: str):
                 continue
 
             x1, y1, x2, y2 = type_box
-            label = f"Truck {truck_type + 1} : {get_direction(bin_status)}"
+            label = f"Truck {truck_type + 1} : {direction}"
             cv2.rectangle(type_frame, (x1, y1), (x2, y2), (0, 255, 0), 5)
             cv2.putText(
                 type_frame,
@@ -186,27 +169,17 @@ def analyze_video_for_truck(video_path: str):
                 2,
             )
 
-            if idx == 0:
-                out_path = output_image_path
-            else:
-                out_path = f"{video_name}_truck_{truck_type + 1}.jpg"
-
+            # Naming requested: `{video_name}_Truck-{n}.jpg` (example: Brunswick_...Truck-1.jpg)
+            out_path = f"{video_name}Truck-{truck_type + 1}.jpg"
             cv2.imwrite(out_path, type_frame)
-            saved_paths.append(out_path)
 
-        selected_image_path = output_image_path if saved_paths else None
-        selected_label = (
-            f"Truck {best_truck_id + 1}" if best_truck_id is not None else "Truck unknown"
-        )
-        msg = (
-            f"{counts_str} | selected: {selected_label} | images: {', '.join(saved_paths)}"
-            if counts_str and saved_paths
-            else selected_label
-        )
-        print(best_truck_id, bin_status, msg, output_image_path, get_direction(bin_status))
-        return best_truck_id, bin_status, msg, selected_image_path, get_direction(bin_status)
+            msg = f"Truck {truck_type + 1} ({count} frames)"
+            print(truck_type, bin_status, msg, out_path, direction)
+            truck_infos.append((truck_type, bin_status, msg, out_path, direction))
+
+        return truck_infos
 
     except Exception as e:
         msg = f"Analysis failed: {str(e)}"
         print(f" ERROR: {msg}")
-        return None, "unknown", msg, None, None
+        return []
