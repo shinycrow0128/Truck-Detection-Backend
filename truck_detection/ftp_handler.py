@@ -8,6 +8,7 @@ from pyftpdlib.handlers import FTPHandler
 from truck_detection import config
 from truck_detection.supabase_ops import insert_video_row
 from truck_detection.utils import parse_timestamp_from_filename
+from truck_detection.database import save_truck_detection
 
 
 class ReolinkFTPHandler(FTPHandler):
@@ -47,17 +48,17 @@ class ReolinkFTPHandler(FTPHandler):
 
                     truck_infos = analyze_video_for_truck(file)
                     for truck_id, bin_status, message, img_path, direction in truck_infos:
-                        # if truck_id is not None and img_path and config.supabase is not None:
-                        #     print(" → Uploading to Supabase...")
-                        #     save_truck_detection(
-                        #         camera_id=camera_id,
-                        #         truck_id=truck_id,
-                        #         bin_status=bin_status,
-                        #         truck_status=direction,
-                        #         detection_time=dt,
-                        #         image_path=img_path,
-                        #         video_path=video_id,
-                        #     )
+                        if truck_id is not None and img_path and config.supabase is not None:
+                            print(" → Uploading to Supabase...")
+                            save_truck_detection(
+                                camera_id=camera_id,
+                                truck_id=truck_id,
+                                bin_status=bin_status,
+                                truck_status=direction,
+                                detection_time=dt,
+                                image_path=img_path,
+                                video_path=video_id,
+                            )
 
                     # If you want aggregated logging only (not per-truck), adjust here.
 

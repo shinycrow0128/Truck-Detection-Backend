@@ -114,7 +114,7 @@ def analyze_video_for_truck(video_path: str):
                     x1, y1, x2, y2 = box
                     h, w = frame.shape[:2]
                     # Expand truck rect before bin classification (padding improves robustness).
-                    pad = 50
+                    pad = 100
                     x1c = max(0, x1 - pad)
                     y1c = max(0, y1 - pad)
                     x2c = min(w, x2 + pad)
