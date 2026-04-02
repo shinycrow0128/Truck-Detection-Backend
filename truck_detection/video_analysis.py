@@ -42,6 +42,9 @@ def analyze_video_for_truck(video_path: str):
         truck_frame_count_total = 0
         truck_type_frame_counts = defaultdict(int)  # key: class id, value: frames where this class appears
         truck_track_frame_counts = defaultdict(int)  # key: tracker id, value: frames where this track id appears
+        truck_type_empty_frame_counts = defaultdict(int)  # key: class id, value: frames classified as empty
+        truck_type_full_frame_counts = defaultdict(int)  # key: class id, value: frames classified as full
+        last_seen_tid_frame = {}  # key: tracker id, value: last frame_count it was counted
 
         best_conf = 0.0
         best_frame = None
@@ -74,12 +77,39 @@ def analyze_video_for_truck(video_path: str):
                     x1, y1, x2, y2 = box
                     center_x = (x1 + x2) // 2
                     cls_key = int(cls_id)
+                    tid_key = int(tid)
 
                     track_history[tid].append(center_x)
 
-                    truck_frame_count_total += 1
-                    truck_track_frame_counts[int(tid)] += 1
-                    truck_type_frame_counts[cls_key] += 1
+                    # Count each tracker only once per video frame (prevents duplicate boxes from inflating "frames").
+                    if last_seen_tid_frame.get(tid_key) != frame_count:
+                        last_seen_tid_frame[tid_key] = frame_count
+                        truck_frame_count_total += 1
+                        truck_track_frame_counts[tid_key] += 1
+                        truck_type_frame_counts[cls_key] += 1
+
+                        # Bin status based on the detected frames of this truck.
+                        h, w = frame.shape[:2]
+                        pad = 5
+                        x1c = max(0, x1 - pad)
+                        y1c = max(0, y1 - pad)
+                        x2c = min(w, x2 + pad)
+                        y2c = min(h, y2 + pad)
+                        if x2c > x1c and y2c > y1c:
+                            crop = frame[y1c:y2c, x1c:x2c]
+                            results_bin = model2.predict(
+                                source=crop,
+                                conf=0.7,
+                                classes=[0, 1],
+                                verbose=False,
+                            )
+                            if results_bin and len(results_bin) > 0 and len(results_bin[0].boxes) != 0:
+                                best_idx = results_bin[0].boxes.conf.argmax()
+                                bin_cls_id = int(results_bin[0].boxes.cls[best_idx])
+                                if bin_cls_id == 0:
+                                    truck_type_empty_frame_counts[cls_key] += 1
+                                else:
+                                    truck_type_full_frame_counts[cls_key] += 1
 
                     prev_type_best = best_per_type.get(cls_key)
                     if prev_type_best is None or conf > prev_type_best[0]:
@@ -123,31 +153,20 @@ def analyze_video_for_truck(video_path: str):
             print(msg)
             return []
 
-        bin_status = "unknown"
-        results_bin = model2.predict(
-            source=video_path,
-            conf=0.7,
-            classes=[0, 1],
-            stream=True,
-            verbose=False,
-        )
-
-        full_count = 0
-        empty_count = 0
-        for result in results_bin:
-            if len(result.boxes) != 0:
-                best_idx = result.boxes.conf.argmax()
-                cls_id = int(result.boxes.cls[best_idx])
-                if cls_id == 0:
-                    empty_count += 1
-                else:
-                    full_count += 1
-
-        bin_status = "empty" if empty_count > full_count else "full"
-        direction = get_direction(bin_status)
-
         truck_infos: list[tuple[int, str, str, str, str | None]] = []
         for truck_type, count in qualified:
+            empty_frames = truck_type_empty_frame_counts.get(truck_type, 0)
+            full_frames = truck_type_full_frame_counts.get(truck_type, 0)
+
+            if empty_frames == 0 and full_frames == 0:
+                bin_status = "unknown"
+                direction = None
+                label_bin = "unknown"
+            else:
+                bin_status = "empty" if empty_frames > full_frames else "full"
+                direction = get_direction(bin_status)
+                label_bin = direction if direction is not None else bin_status
+
             best_type_entry = best_per_type.get(int(truck_type))
             if best_type_entry is None:
                 continue
@@ -157,7 +176,7 @@ def analyze_video_for_truck(video_path: str):
                 continue
 
             x1, y1, x2, y2 = type_box
-            label = f"Truck {truck_type + 1} : {direction}"
+            label = f"Truck {truck_type + 1} : {label_bin}"
             cv2.rectangle(type_frame, (x1, y1), (x2, y2), (0, 255, 0), 5)
             cv2.putText(
                 type_frame,
@@ -170,10 +189,18 @@ def analyze_video_for_truck(video_path: str):
             )
 
             # Naming requested: `{video_name}_Truck-{n}.jpg` (example: Brunswick_...Truck-1.jpg)
-            out_path = f"{video_name}Truck-{truck_type + 1}.jpg"
+            truck_suffix = f"Truck-{truck_type + 1}.jpg"
+            out_path = (
+                f"{video_name}{truck_suffix}"
+                if video_name.endswith("_")
+                else f"{video_name}_{truck_suffix}"
+            )
             cv2.imwrite(out_path, type_frame)
 
-            msg = f"Truck {truck_type + 1} ({count} frames)"
+            msg = (
+                f"Truck {truck_type + 1} ({count} frames): {bin_status} "
+                f"(empty={empty_frames}, full={full_frames})"
+            )
             print(truck_type, bin_status, msg, out_path, direction)
             truck_infos.append((truck_type, bin_status, msg, out_path, direction))
 
