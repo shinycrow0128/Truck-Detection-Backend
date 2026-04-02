@@ -113,11 +113,12 @@ def analyze_video_for_truck(video_path: str):
 
                     x1, y1, x2, y2 = box
                     h, w = frame.shape[:2]
-                    # Crop EXACT detected truck rect (no padding).
-                    x1c = max(0, min(x1, w - 1))
-                    x2c = max(0, min(x2, w))
-                    y1c = max(0, min(y1, h - 1))
-                    y2c = max(0, min(y2, h))
+                    # Expand truck rect before bin classification (padding improves robustness).
+                    pad = 50
+                    x1c = max(0, x1 - pad)
+                    y1c = max(0, y1 - pad)
+                    x2c = min(w, x2 + pad)
+                    y2c = min(h, y2 + pad)
                     if x2c <= x1c or y2c <= y1c:
                         continue
 
@@ -127,7 +128,7 @@ def analyze_video_for_truck(video_path: str):
 
                     results_bin = model2.predict(
                         source=crop,
-                        conf=0.7,
+                        conf=MIN_CONF,
                         classes=[0, 1],
                         verbose=False,
                     )
