@@ -68,6 +68,9 @@ def analyze_video_for_truck(video_path: str):
             )[0]
 
             if results.boxes.id is not None:
+                # If the tracker emits multiple boxes for the same tid within the same video frame,
+                # we only want to classify the highest-confidence box (prevents noisy/wrong crops).
+                frame_tid_best_det = {}
                 boxes = results.boxes.xyxy.cpu().numpy().astype(int)
                 confs = results.boxes.conf.cpu().numpy()
                 cls_ids = results.boxes.cls.cpu().numpy().astype(int)
@@ -81,35 +84,10 @@ def analyze_video_for_truck(video_path: str):
 
                     track_history[tid].append(center_x)
 
-                    # Count each tracker only once per video frame (prevents duplicate boxes from inflating "frames").
-                    if last_seen_tid_frame.get(tid_key) != frame_count:
-                        last_seen_tid_frame[tid_key] = frame_count
-                        truck_frame_count_total += 1
-                        truck_track_frame_counts[tid_key] += 1
-                        truck_type_frame_counts[cls_key] += 1
-
-                        # Bin status based on the detected frames of this truck.
-                        h, w = frame.shape[:2]
-                        pad = 5
-                        x1c = max(0, x1 - pad)
-                        y1c = max(0, y1 - pad)
-                        x2c = min(w, x2 + pad)
-                        y2c = min(h, y2 + pad)
-                        if x2c > x1c and y2c > y1c:
-                            crop = frame[y1c:y2c, x1c:x2c]
-                            results_bin = model2.predict(
-                                source=crop,
-                                conf=0.7,
-                                classes=[0, 1],
-                                verbose=False,
-                            )
-                            if results_bin and len(results_bin) > 0 and len(results_bin[0].boxes) != 0:
-                                best_idx = results_bin[0].boxes.conf.argmax()
-                                bin_cls_id = int(results_bin[0].boxes.cls[best_idx])
-                                if bin_cls_id == 0:
-                                    truck_type_empty_frame_counts[cls_key] += 1
-                                else:
-                                    truck_type_full_frame_counts[cls_key] += 1
+                    # Collect best detection per tid for this video frame (bin classification happens after the loop).
+                    prev = frame_tid_best_det.get(tid_key)
+                    if prev is None or conf > prev[0]:
+                        frame_tid_best_det[tid_key] = (float(conf), cls_key, box)
 
                     prev_type_best = best_per_type.get(cls_key)
                     if prev_type_best is None or conf > prev_type_best[0]:
@@ -121,6 +99,46 @@ def analyze_video_for_truck(video_path: str):
                         best_frame = frame.copy()
                         best_box = box
                         best_truck_id = cls_key
+
+                # Update frame counts + bin status for each tid once per video frame,
+                # using the highest-confidence rect for that tid in this frame.
+                for tid_key, (_conf, cls_key, box) in frame_tid_best_det.items():
+                    if last_seen_tid_frame.get(tid_key) == frame_count:
+                        continue
+
+                    last_seen_tid_frame[tid_key] = frame_count
+                    truck_frame_count_total += 1
+                    truck_track_frame_counts[tid_key] += 1
+                    truck_type_frame_counts[cls_key] += 1
+
+                    x1, y1, x2, y2 = box
+                    h, w = frame.shape[:2]
+                    # Crop EXACT detected truck rect (no padding).
+                    x1c = max(0, min(x1, w - 1))
+                    x2c = max(0, min(x2, w))
+                    y1c = max(0, min(y1, h - 1))
+                    y2c = max(0, min(y2, h))
+                    if x2c <= x1c or y2c <= y1c:
+                        continue
+
+                    crop = frame[y1c:y2c, x1c:x2c]
+                    if crop.size == 0:
+                        continue
+
+                    results_bin = model2.predict(
+                        source=crop,
+                        conf=0.7,
+                        classes=[0, 1],
+                        verbose=False,
+                    )
+                    if results_bin and len(results_bin) > 0 and len(results_bin[0].boxes) != 0:
+                        boxes_bin = results_bin[0].boxes
+                        best_idx = boxes_bin.conf.argmax()
+                        bin_cls_id = int(boxes_bin.cls[best_idx])
+                        if bin_cls_id == 0:
+                            truck_type_empty_frame_counts[cls_key] += 1
+                        else:
+                            truck_type_full_frame_counts[cls_key] += 1
         cap.release()
         per_type = dict(
             sorted(truck_type_frame_counts.items(), key=lambda kv: kv[1], reverse=True)
