@@ -362,22 +362,6 @@ def analyze_video_for_truck(video_path: str):
             print(msg)
             return None, "unknown", msg, None, None
 
-        # xs = track_history[best_track_id_final]
-        # if len(xs) < 2:
-        #     direction = "unknown"
-        # else:
-        #     first_x = xs[0]
-        #     last_x  = xs[-1]
-        #     delta_x = last_x - first_x
-
-        #     if abs(delta_x) < 15:   # ← tune this threshold (pixels)
-        #         direction = "unknown / stationary"
-        #     elif delta_x > 0:
-        #         direction = "right"     # x increases → left-to-right
-        #     else:
-        #         direction = "left"
-
-
         # ─── Classify bin status (empty/full) ────────────────────────
         bin_status = "unknown"
 
@@ -408,38 +392,6 @@ def analyze_video_for_truck(video_path: str):
                 bin_status = "empty"
             else:
                 bin_status = "full"
-            # x1, y1, x2, y2 = best_box
-
-            # margin = 30
-            # crop_x1 = max(0, x1 - margin)
-            # crop_y1 = max(0, y1 - margin)
-            # crop_x2 = min(best_frame.shape[1], x2 + margin)
-            # crop_y2 = min(best_frame.shape[0], y2 + margin)
-
-            # truck_crop = best_frame[crop_y1:crop_y2, crop_x1:crop_x2]
-
-            # if truck_crop.size == 0 or truck_crop.shape[0] < 8 or truck_crop.shape[1] < 8:
-            #     print(f"Warning: invalid crop size {truck_crop.shape if truck_crop is not None else 'None'} → skipping classification")
-            # else:
-            #     try:
-            #         cls_results = model2(truck_crop, conf=0.60, verbose=False)[0]
-
-            #         if len(cls_results.boxes) > 0:
-            #             # take the highest confidence detection
-            #             best_cls_idx = cls_results.boxes.conf.argmax()
-            #             bin_class_id = int(cls_results.boxes.cls[best_cls_idx])
-            #             bin_conf     = float(cls_results.boxes.conf[best_cls_idx])
-
-            #             if bin_conf >= 0.65:          # ← your threshold
-            #                 bin_status = "full" if bin_class_id == 1 else "empty"
-            #                 print(f"Bin classified: {bin_status} (conf {bin_conf:.3f})")
-            #             else:
-            #                 print(f"Bin classification confidence too low: {bin_conf:.3f}")
-            #         else:
-            #             print("Classification model returned no detections on truck crop")
-            #     except Exception as e:
-            #         print(f"Classification step failed: {e}")
-
 
         # ─── Draw best frame (optional improvement) ──────────────────
         if best_frame is not None and best_box is not None:
@@ -497,17 +449,17 @@ class ReolinkFTPHandler(FTPHandler):
                     # # 3) Run detection pipeline (existing behavior)
                     truck_id, bin_status, message, img_path, direction = analyze_video_for_truck(file)
 
-                    if truck_id != None and img_path and supabase is not None:
-                        print(" → Uploading to Supabase...")
-                        save_truck_detection(
-                            camera_id=camera_id,
-                            truck_id=truck_id,          # ← change later if needed
-                            bin_status=bin_status,
-                            truck_status=direction,
-                            detection_time=dt,
-                            image_path=img_path,
-                            video_path=video_id
-                        )
+                    # if truck_id != None and img_path and supabase is not None:
+                    #     print(" → Uploading to Supabase...")
+                    #     save_truck_detection(
+                    #         camera_id=camera_id,
+                    #         truck_id=truck_id,          # ← change later if needed
+                    #         bin_status=bin_status,
+                    #         truck_status=direction,
+                    #         detection_time=dt,
+                    #         image_path=img_path,
+                    #         video_path=video_id
+                    #     )
 
                     print(" " + "─" * 70)
 
