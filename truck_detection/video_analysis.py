@@ -143,24 +143,41 @@ def analyze_video_for_truck(video_path: str):
         # If multiple trucks are present in the video, pick the truck type with the most detected frames.
         # This matches the requested behavior like: Truck 1 = 65 frames, Truck 2 = 40 frames.
         counts_str = ""
+        counts_sorted: list[tuple[int, int]] = []
         if truck_type_frame_counts:
-            best_truck_id = max(truck_type_frame_counts.items(), key=lambda kv: kv[1])[0]
-            best_type_entry = best_per_type.get(int(best_truck_id))
-            if best_type_entry is not None:
-                _conf, best_frame, best_box = best_type_entry
             counts_sorted = sorted(
                 truck_type_frame_counts.items(), key=lambda kv: kv[1], reverse=True
             )
             counts_str = ", ".join(
-                [f"Truck {truck_type + 1}: {count} frames" for truck_type, count in counts_sorted]
+                [
+                    f"Truck {truck_type + 1}: {count} frames"
+                    for truck_type, count in counts_sorted
+                ]
             )
 
-        if best_frame is not None and best_box is not None:
-            x1, y1, x2, y2 = best_box
-            label = f"Truck {best_truck_id + 1} : {get_direction(bin_status)}"
-            cv2.rectangle(best_frame, (x1, y1), (x2, y2), (0, 255, 0), 5)
+        # Save one best frame per truck type that appears.
+        # - Primary truck (highest frame count) keeps the old output name: `{video_name}_truck.jpg`
+        # - Others get suffixed names: `{video_name}_truck_{n}.jpg`
+        saved_paths: list[str] = []
+        primary_truck_type: int | None = None
+        if counts_sorted:
+            primary_truck_type = counts_sorted[0][0]
+            best_truck_id = primary_truck_type
+
+        for idx, (truck_type, _count) in enumerate(counts_sorted):
+            best_type_entry = best_per_type.get(int(truck_type))
+            if best_type_entry is None:
+                continue
+
+            _conf, type_frame, type_box = best_type_entry
+            if type_frame is None or type_box is None:
+                continue
+
+            x1, y1, x2, y2 = type_box
+            label = f"Truck {truck_type + 1} : {get_direction(bin_status)}"
+            cv2.rectangle(type_frame, (x1, y1), (x2, y2), (0, 255, 0), 5)
             cv2.putText(
-                best_frame,
+                type_frame,
                 label,
                 (x1, y1 - 15),
                 cv2.FONT_HERSHEY_SIMPLEX,
@@ -169,10 +186,25 @@ def analyze_video_for_truck(video_path: str):
                 2,
             )
 
-            cv2.imwrite(output_image_path, best_frame)
-        msg = f"{counts_str} | selected: Truck {best_truck_id + 1}" if counts_str else f"Truck : {best_truck_id + 1}"
+            if idx == 0:
+                out_path = output_image_path
+            else:
+                out_path = f"{video_name}_truck_{truck_type + 1}.jpg"
+
+            cv2.imwrite(out_path, type_frame)
+            saved_paths.append(out_path)
+
+        selected_image_path = output_image_path if saved_paths else None
+        selected_label = (
+            f"Truck {best_truck_id + 1}" if best_truck_id is not None else "Truck unknown"
+        )
+        msg = (
+            f"{counts_str} | selected: {selected_label} | images: {', '.join(saved_paths)}"
+            if counts_str and saved_paths
+            else selected_label
+        )
         print(best_truck_id, bin_status, msg, output_image_path, get_direction(bin_status))
-        return best_truck_id, bin_status, msg, output_image_path, get_direction(bin_status)
+        return best_truck_id, bin_status, msg, selected_image_path, get_direction(bin_status)
 
     except Exception as e:
         msg = f"Analysis failed: {str(e)}"
